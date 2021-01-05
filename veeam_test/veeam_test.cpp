@@ -1,99 +1,112 @@
-﻿// Veeam Test Task.cpp : Defines the entry point for the application.
-//
-#include <algorithm>
+﻿#include <algorithm>
 #include <execution>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
-#include <ranges>
 #include <string>
 #include <tuple>
 #include <vector>
 
-#include "EasyCRC/Types/crc32_c.h"
-#include "veeam_test.h"
+#include "utils.hpp"
+
+uintmax_t const ONE_PART = 1;
 
 constexpr int MB = 1 << 20;
 
-using part_range = std::tuple<size_t, size_t>;
-using file_parts = std::vector<part_range>;
+namespace bip = boost::interprocess;
+namespace fs = std::filesystem;
 
-auto gen_sig(file_parts const &parts)
-    -> std::optional<std::vector<std::string>> {
-  if (parts.empty()) {
+using part_range = std::tuple<size_t, size_t>;
+using parts_ranges = std::vector<part_range>;
+using file_regions = std::vector<bip::mapped_region>;
+
+auto calc_part_ranges(fs::path const in, uintmax_t const size = MB)
+    -> std::optional<parts_ranges> {
+  auto const file_size = std::filesystem::file_size(in);
+
+  if (0 == file_size) {
     return std::nullopt;
   }
 
-  std::vector<std::string> res;
-  res.resize(parts.size());
-
-  std::transform(/*std::execution::par,*/ parts.cbegin(), parts.cend(),
-                 res.begin(), [&](part_range const range) -> std::string {
-                   EasyCRC::Calculator<EasyCRC::Type::CRC32_C> crc32;
-
-                   auto const [begin, end] = range;
-
-                   for (auto i = begin; i < end; i++) {
-                     std::cout << i << '\n';
-
-                     crc32 << i;
-                   }
-
-                   auto res = crc32.result();
-                   std::cout << res << '\n';
-
-                   return std::to_string(res);
-                 });
-
-  return std::optional(res);
-}
-
-auto split(std::filesystem::path const in, int const size = MB)
-    -> std::optional<file_parts> {
-  auto const file_size = std::filesystem::file_size(in);
-  auto const chunks_count = file_size / size;
-
-  auto res = file_parts();
-  res.reserve(chunks_count);
+  auto const chunks_count = std::max(file_size / size, ONE_PART);
+  parts_ranges ranges;
+  ranges.reserve(chunks_count);
 
   for (size_t i = 0; i < chunks_count; i++) {
     auto const start_pos = MB * i;
     auto const end_pos = std::min(start_pos + MB, file_size);
-
-    std::cout << "start_pos: " << start_pos << "\n";
-    std::cout << "end_pos: " << end_pos << "\n";
-
-    res.emplace_back(std::tie(start_pos, end_pos));
+    ranges.emplace_back(std::tie(start_pos, end_pos));
   }
 
-  return std::optional(res);
+  return std::optional(ranges);
+}
+
+auto split_file_to_regions(bip::file_mapping const &file,
+                           parts_ranges const &ranges)
+    -> std::optional<parts_hashes> {
+
+  if (ranges.empty()) {
+    return std::nullopt;
+  }
+
+  std::mutex parts_hashes_m;
+  parts_hashes hashes;
+  hashes.reserve(ranges.size());
+
+  std::for_each(std::execution::par, ranges.cbegin(), ranges.cend(),
+                [&](part_range const &range) {
+                  auto const [begin, end] = range;
+                  auto const region_size = end - begin;
+
+                  bip::mapped_region mapped_rgn(file, bip::read_only, begin,
+                                                region_size);
+
+                  char const *const mmaped_data =
+                      static_cast<char *>(mapped_rgn.get_address());
+
+                  auto const mmap_size = mapped_rgn.get_size();
+
+                  using boost::uuids::detail::md5;
+
+                  md5 hash;
+                  md5::digest_type digest;
+
+                  hash.process_bytes(mmaped_data, mmap_size);
+                  hash.get_digest(digest);
+
+                  const std::lock_guard<std::mutex> lock(parts_hashes_m);
+                  hashes.emplace_back(utils::hash_to_str(digest));
+                });
+
+  return std::optional(hashes);
 }
 
 auto main(int argc, char *argv[]) -> int {
-  std::cout << "Hello CMake." << std::endl;
-
-  std::string in = argv[1];
-
-  std::cout << "in: " << in << '\n';
-
-  std::filesystem::path path(in);
-
-  if (!std::filesystem::exists(path)) {
-    return 1;
-  }
-  auto res = split(path);
-
-  if (!res.has_value()) {
+  if (argc != 3) {
     return 1;
   }
 
-  auto const parts = res.value();
+  fs::path in_file(argv[1]);
+  fs::path out_file(argv[2]);
 
-  auto const gens_res = gen_sig(parts);
-
-  for (auto s : std::views::all(gens_res.value())) {
-    std::cout << s << '\n';
+  auto const file = utils::open_file(in_file);
+  if (!file.has_value()) {
+    return 1;
   }
+
+  auto const ranges = calc_part_ranges(in_file);
+  if (!ranges.has_value()) {
+    return 1;
+  }
+
+  auto const hashes = split_file_to_regions(file.value(), ranges.value());
+  if (!hashes.has_value()) {
+    return 1;
+  }
+
+  utils::write_to_file(out_file, hashes.value());
 
   return 0;
 }
