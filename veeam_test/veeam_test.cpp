@@ -27,7 +27,7 @@ auto calc_part_ranges(fs::path const in, uintmax_t const size = MB)
   auto const file_size = std::filesystem::file_size(in);
 
   if (0 == file_size || 0 == size) {
-    return std::nullopt;
+    return {};
   }
 
   auto const chunks_count = std::max(file_size / size, ONE_PART);
@@ -48,7 +48,7 @@ auto split_file_to_regions(bip::file_mapping const &file,
     -> std::optional<parts_hashes> {
 
   if (ranges.empty()) {
-    return std::nullopt;
+    return {};
   }
 
   std::mutex parts_hashes_m;

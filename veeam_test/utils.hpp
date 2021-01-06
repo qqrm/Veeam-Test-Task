@@ -15,7 +15,7 @@ namespace fs = std::filesystem;
 
 inline std::optional<bip::file_mapping> open_file(fs::path const &in) {
   if (!fs::exists(in)) {
-    return std::nullopt;
+    return {};
   }
 
   try {
@@ -23,7 +23,7 @@ inline std::optional<bip::file_mapping> open_file(fs::path const &in) {
     return std::optional(std::move(file));
   } catch (const bip::interprocess_exception &e) {
     std::cerr << e.what() << '\n';
-    return std::nullopt;
+    return {};
   }
 }
 
