@@ -26,7 +26,7 @@ auto calc_part_ranges(fs::path const in, uintmax_t const size = MB)
     -> std::optional<parts_ranges> {
   auto const file_size = std::filesystem::file_size(in);
 
-  if (0 == file_size) {
+  if (0 == file_size || 0 == size) {
     return std::nullopt;
   }
 
